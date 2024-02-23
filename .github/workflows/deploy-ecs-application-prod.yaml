@@ -1,0 +1,62 @@
+name: CD Prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      image-tag:
+        description: "Docker image tag"
+        required: true
+        default: "latest"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: prod
+
+    steps:
+      - name: Authorize AWS
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Clone repo
+        uses: actions/checkout@v2
+
+      - name: Build application
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: baremetal-application
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          cd software
+          docker build -t ${{env.ECR_REGISTRY}}/${{env.ECR_REPOSITORY}}:${{env.IMAGE_TAG}} .
+          docker tag ${{env.ECR_REGISTRY}}/${{env.ECR_REPOSITORY}}:${{env.IMAGE_TAG}} ${{env.ECR_REGISTRY}}/${{env.ECR_REPOSITORY}}:latest
+          docker push ${{env.ECR_REGISTRY}}/${{env.ECR_REPOSITORY}}:${{env.IMAGE_TAG}}
+          docker push ${{env.ECR_REGISTRY}}/${{env.ECR_REPOSITORY}}:latest
+
+      - name: Update Amazon ECS task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: baremetal-application
+          IMAGE_TAG: ${{ github.event.inputs.image-tag }}
+        with:
+          task-definition: task-definition.json
+          container-name: application
+          # image: ${{env.ECR_REGISTRY}}/${{env.ECR_REPOSITORY}}:${{env.IMAGE_TAG}}
+          image: "607477397669.dkr.ecr.us-east-1.amazonaws.com/baremetal-application:latest"
+
+      - name: Deploy Amazon ECS service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: application
+          cluster: baremetal
+          wait-for-service-stability: true
